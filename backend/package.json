@@ -1,0 +1,17 @@
+{
+  "name": "script-runner-backend",
+  "version": "1.0.0",
+  "description": "SSH execution backend for the script runner app",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "ssh2": "^1.15.0",
+    "ws": "^8.18.0",
+    "@supabase/supabase-js": "^2.45.4",
+    "dotenv": "^16.4.5"
+  }
+}
