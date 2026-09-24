@@ -37,6 +37,10 @@ export const backendApi = {
   updateCommand: (commandId, payload) => request('PATCH', `/commands/${commandId}`, payload),
   deleteCommand: (commandId) => request('DELETE', `/commands/${commandId}`, {}),
 
+  createBatch: (payload) => request('POST', '/batches', payload),
+  updateBatch: (batchId, payload) => request('PATCH', `/batches/${batchId}`, payload),
+  deleteBatch: (batchId) => request('DELETE', `/batches/${batchId}`, {}),
+
   createShare: (payload) => request('POST', '/shares', payload),
   deleteShare: (payload) => request('DELETE', '/shares', payload),
   listShareContext: (payload) => request('POST', '/shares/list', payload),

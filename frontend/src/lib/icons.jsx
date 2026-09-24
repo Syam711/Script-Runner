@@ -29,7 +29,7 @@ const base = (size) => ({
  * The mark: a terminal chevron and cursor inside a rounded enclosure.
  * Reads as "a place where commands are sent" and stays legible at 20px.
  */
-export function Logo({ size = 28, title = 'Relay' }) {
+export function Logo({ size = 28, title = 'ScriptShelf' }) {
   return (
     <svg
       width={size}
@@ -65,7 +65,7 @@ export function Wordmark({ size = 28 }) {
   return (
     <span className="wordmark">
       <Logo size={size} />
-      <span className="wordmark-text">Relay</span>
+      <span className="wordmark-text">ScriptShelf</span>
     </span>
   );
 }
@@ -183,6 +183,18 @@ export const Icon = {
   ChevronDown: ({ size = 18 }) => (
     <svg {...base(size)}>
       <path d="M5.5 9.5 12 16l6.5-6.5" />
+    </svg>
+  ),
+
+  ArrowUp: ({ size = 18 }) => (
+    <svg {...base(size)}>
+      <path d="M12 19V6.5M6.5 11 12 5.5 17.5 11" />
+    </svg>
+  ),
+
+  ArrowDown: ({ size = 18 }) => (
+    <svg {...base(size)}>
+      <path d="M12 5v12.5M6.5 13 12 18.5 17.5 13" />
     </svg>
   ),
 

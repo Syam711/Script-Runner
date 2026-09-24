@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { Icon, StatusDot } from '../lib/icons';
 
 const STATUS = {
+  pending:   { label: 'Waiting',   tone: 'idle',    cls: 'run-status-idle' },
   running:   { label: 'Running',   tone: 'running', cls: 'run-status-running' },
   success:   { label: 'Finished',  tone: 'ok',      cls: 'run-status-ok' },
   failed:    { label: 'Failed',    tone: 'bad',     cls: 'run-status-bad' },

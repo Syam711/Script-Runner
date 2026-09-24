@@ -5,8 +5,10 @@ import { backendApi } from '../lib/backendApi';
 import { useAuth } from '../context/AuthContext';
 import { PageHead, Empty } from '../components/AppShell';
 import CommandForm from '../components/CommandForm';
+import BatchForm from '../components/BatchForm';
 import ShareDialog from '../components/ShareDialog';
 import RunPanel from '../components/RunPanel';
+import BatchRunPanel from '../components/BatchRunPanel';
 import Modal from '../components/Modal';
 import { Icon } from '../lib/icons';
 
@@ -22,30 +24,41 @@ export default function CommandsPage() {
 
   const [region, setRegion] = useState(null);
   const [commands, setCommands] = useState([]);
+  const [batches, setBatches] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState(null);
-  const [sharing, setSharing] = useState(null);
+  const [batchFormOpen, setBatchFormOpen] = useState(false);
+  const [editingBatch, setEditingBatch] = useState(null);
+  const [sharing, setSharing] = useState(null); // { type: 'command'|'batch', id, name }
   const [running, setRunning] = useState(null);
+  const [runningBatch, setRunningBatch] = useState(null);
   const [scratch, setScratch] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null); // { kind: 'command'|'batch', id, name }
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [r, c] = await Promise.all([
+    const [r, c, b] = await Promise.all([
       supabase.from('regions').select('*').eq('id', regionId).single(),
       supabase
         .from('commands')
         .select('*')
         .eq('region_id', regionId)
         .order('created_at', { ascending: false }),
+      supabase
+        .from('batches')
+        .select('*, batch_steps(commands(safety_tier))')
+        .eq('region_id', regionId)
+        .order('created_at', { ascending: false }),
     ]);
     if (r.error) setError(r.error.message);
     else if (c.error) setError(c.error.message);
+    else if (b.error) setError(b.error.message);
     else {
       setRegion(r.data);
       setCommands(c.data);
+      setBatches(b.data);
       setError(null);
     }
     setLoading(false);
@@ -65,9 +78,20 @@ export default function CommandsPage() {
     load();
   };
 
+  const closeBatchForm = () => {
+    setBatchFormOpen(false);
+    setEditingBatch(null);
+  };
+
+  const batchSaved = () => {
+    closeBatchForm();
+    load();
+  };
+
   const remove = async () => {
     try {
-      await backendApi.deleteCommand(confirmDelete.id);
+      if (confirmDelete.kind === 'batch') await backendApi.deleteBatch(confirmDelete.id);
+      else await backendApi.deleteCommand(confirmDelete.id);
       setConfirmDelete(null);
       load();
     } catch (err) {
@@ -84,6 +108,10 @@ export default function CommandsPage() {
         <button className="btn btn-quiet" onClick={() => setScratch(true)}>
           <Icon.Terminal size={15} />
           Scratch pad
+        </button>
+        <button className="btn btn-quiet" onClick={() => setBatchFormOpen(true)}>
+          <Icon.Sliders size={15} />
+          New batch
         </button>
         <button className="btn btn-primary" onClick={() => setFormOpen(true)}>
           <Icon.Plus size={15} />
@@ -165,7 +193,9 @@ export default function CommandsPage() {
                             {isAdmin && (
                               <button
                                 className="btn btn-ghost btn-icon btn-reveal"
-                                onClick={() => setSharing(c)}
+                                onClick={() =>
+                                  setSharing({ type: 'command', id: c.id, name: c.name })
+                                }
                                 title="Share"
                                 aria-label={`Share ${c.name}`}
                               >
@@ -174,9 +204,117 @@ export default function CommandsPage() {
                             )}
                             <button
                               className="btn btn-ghost btn-icon btn-reveal"
-                              onClick={() => setConfirmDelete(c)}
+                              onClick={() =>
+                                setConfirmDelete({ kind: 'command', id: c.id, name: c.name })
+                              }
                               title="Delete"
                               aria-label={`Delete ${c.name}`}
+                            >
+                              <Icon.Trash size={15} />
+                            </button>
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </section>
+
+        <section className="card">
+          <div className="card-head">
+            <h2 className="card-title">Batches</h2>
+            <span className="card-count">{batches.length}</span>
+          </div>
+          {loading ? (
+            <div className="card-body muted">Loading batches…</div>
+          ) : batches.length === 0 ? (
+            <Empty
+              icon={<Icon.Sliders size={40} />}
+              title="No batches yet"
+              text="Chain a few saved commands together to run them in order, one click at a time."
+              action={
+                commands.length > 0 && (
+                  <button className="btn btn-primary" onClick={() => setBatchFormOpen(true)}>
+                    <Icon.Plus size={15} />
+                    Create a batch
+                  </button>
+                )
+              }
+            />
+          ) : (
+            <table className="table table-rows">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Steps</th>
+                  <th>Visible to</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {batches.map((b) => {
+                  const mine = b.owner_id === user.id;
+                  const canManage = mine || isAdmin;
+                  const stepCount = b.batch_steps?.length ?? 0;
+                  const hasDestructive = (b.batch_steps || []).some(
+                    (s) => s.commands?.safety_tier === 'destructive'
+                  );
+                  return (
+                    <tr key={b.id}>
+                      <td className="cell-primary">{b.name}</td>
+                      <td className="mono-sm muted">
+                        {stepCount} step{stepCount === 1 ? '' : 's'}
+                      </td>
+                      <td>
+                        <span
+                          className={`badge ${b.visibility === 'shared' ? 'badge-jade' : 'badge-neutral'}`}
+                        >
+                          {b.visibility === 'shared' ? 'Team' : mine ? 'Just me' : 'Private'}
+                        </span>
+                      </td>
+                      <td className="cell-actions">
+                        <button
+                          className="btn btn-quiet btn-sm"
+                          onClick={() => setRunningBatch({ ...b, hasDestructive })}
+                        >
+                          <Icon.Play size={12} />
+                          Run
+                        </button>
+                        {canManage && (
+                          <>
+                            <button
+                              className="btn btn-ghost btn-icon btn-reveal"
+                              onClick={() => {
+                                setEditingBatch(b);
+                                setBatchFormOpen(true);
+                              }}
+                              title="Edit"
+                              aria-label={`Edit ${b.name}`}
+                            >
+                              <Icon.Pencil size={15} />
+                            </button>
+                            {isAdmin && (
+                              <button
+                                className="btn btn-ghost btn-icon btn-reveal"
+                                onClick={() =>
+                                  setSharing({ type: 'batch', id: b.id, name: b.name })
+                                }
+                                title="Share"
+                                aria-label={`Share ${b.name}`}
+                              >
+                                <Icon.Share size={15} />
+                              </button>
+                            )}
+                            <button
+                              className="btn btn-ghost btn-icon btn-reveal"
+                              onClick={() =>
+                                setConfirmDelete({ kind: 'batch', id: b.id, name: b.name })
+                              }
+                              title="Delete"
+                              aria-label={`Delete ${b.name}`}
                             >
                               <Icon.Trash size={15} />
                             </button>
@@ -208,6 +346,22 @@ export default function CommandsPage() {
         </Modal>
       )}
 
+      {batchFormOpen && (
+        <Modal
+          title={editingBatch ? 'Edit batch' : 'New batch'}
+          sub={region?.name}
+          onClose={closeBatchForm}
+          wide
+        >
+          <BatchForm
+            regionId={regionId}
+            existingBatch={editingBatch}
+            onSaved={batchSaved}
+            onCancel={closeBatchForm}
+          />
+        </Modal>
+      )}
+
       {running && (
         <Modal title="Run script" sub={region?.name} onClose={() => setRunning(null)} wide>
           <RunPanel
@@ -217,6 +371,17 @@ export default function CommandsPage() {
             commandName={running.name}
             safetyTier={running.safety_tier}
             initialCommandText={running.content}
+          />
+        </Modal>
+      )}
+
+      {runningBatch && (
+        <Modal title="Run batch" sub={region?.name} onClose={() => setRunningBatch(null)} wide>
+          <BatchRunPanel
+            region={region}
+            batchId={runningBatch.id}
+            batchName={runningBatch.name}
+            hasDestructive={runningBatch.hasDestructive}
           />
         </Modal>
       )}
@@ -234,7 +399,7 @@ export default function CommandsPage() {
 
       {sharing && (
         <ShareDialog
-          resourceType="command"
+          resourceType={sharing.type}
           resourceId={sharing.id}
           resourceName={sharing.name}
           onClose={() => {
@@ -254,12 +419,16 @@ export default function CommandsPage() {
                 Keep it
               </button>
               <button className="btn btn-danger" onClick={remove}>
-                Delete script
+                Delete {confirmDelete.kind === 'batch' ? 'batch' : 'script'}
               </button>
             </>
           }
         >
-          <p>Past runs of this script stay in history, along with the exact commands that ran.</p>
+          <p>
+            {confirmDelete.kind === 'batch'
+              ? 'Past runs of this batch stay in history, along with the exact commands that ran.'
+              : 'Past runs of this script stay in history, along with the exact commands that ran.'}
+          </p>
         </Modal>
       )}
     </>
