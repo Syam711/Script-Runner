@@ -1,7 +1,8 @@
+const crypto = require('crypto');
 const WebSocket = require('ws');
 const supabaseAdmin = require('./supabaseAdmin');
 const { getSecret } = require('./vault');
-const { runSession } = require('./sshRunner');
+const { runSession, runBatch } = require('./sshRunner');
 const config = require('./config');
 
 /**
@@ -104,6 +105,48 @@ async function hasShare(resourceType, resourceId, userId) {
   return !!data;
 }
 
+/**
+ * Loads a batch, verifies the caller can see it (owner/admin/share),
+ * and loads its ordered steps with each step's command content. Also
+ * re-verifies each referenced command is visible to the caller — a
+ * batch should never be usable to run a command the user couldn't
+ * otherwise reach directly, even if that command was somehow attached
+ * to a batch the user can see.
+ */
+async function loadBatchForRun({ batchId, userId, orgId, isAdmin }) {
+  const { data: batch, error: batchErr } = await supabaseAdmin
+    .from('batches')
+    .select('*')
+    .eq('id', batchId)
+    .single();
+  if (batchErr || !batch || batch.org_id !== orgId) {
+    throw new Error('Batch not found');
+  }
+
+  const batchOk =
+    batch.owner_id === userId || isAdmin || (await hasShare('batch', batchId, userId));
+  if (!batchOk) throw new Error('Access denied to this batch');
+
+  const { data: stepRows, error: stepsErr } = await supabaseAdmin
+    .from('batch_steps')
+    .select('step_order, command_id, commands(*)')
+    .eq('batch_id', batchId)
+    .order('step_order', { ascending: true });
+  if (stepsErr || !stepRows || stepRows.length === 0) {
+    throw new Error('Batch has no steps');
+  }
+
+  for (const row of stepRows) {
+    const cmd = row.commands;
+    if (!cmd) throw new Error('A command in this batch no longer exists');
+    const cmdOk =
+      cmd.owner_id === userId || isAdmin || (await hasShare('command', cmd.id, userId));
+    if (!cmdOk) throw new Error('Access denied to a command in this batch');
+  }
+
+  return { batch, steps: stepRows.map((r) => r.commands) };
+}
+
 function attachWebSocketServer(httpServer) {
   const wss = new WebSocket.Server({ server: httpServer });
 
@@ -124,6 +167,10 @@ function attachWebSocketServer(httpServer) {
 
       if (msg.type === 'run') {
         handleRun(ws, msg).catch((err) => {
+          ws.send(JSON.stringify({ type: 'error', message: err.message }));
+        });
+      } else if (msg.type === 'run_batch') {
+        handleRunBatch(ws, msg).catch((err) => {
           ws.send(JSON.stringify({ type: 'error', message: err.message }));
         });
       } else if (msg.type === 'cancel') {
@@ -310,6 +357,191 @@ async function handleRun(ws, msg) {
   }
 }
 
+async function handleRunBatch(ws, msg) {
+  // msg: { type: 'run_batch', accessToken, batchId }
+  const { accessToken, batchId } = msg;
+
+  if (!accessToken || !batchId) {
+    return ws.send(JSON.stringify({ type: 'error', message: 'Missing required fields' }));
+  }
+
+  const { data: userData, error: userErr } = await supabaseAdmin.auth.getUser(accessToken);
+  if (userErr || !userData?.user) {
+    return ws.send(JSON.stringify({ type: 'error', message: 'Invalid or expired session' }));
+  }
+  const userId = userData.user.id;
+
+  const { data: profile, error: profileErr } = await supabaseAdmin
+    .from('profiles')
+    .select('*')
+    .eq('id', userId)
+    .single();
+  if (profileErr || !profile) {
+    return ws.send(JSON.stringify({ type: 'error', message: 'Profile not found' }));
+  }
+
+  // Same one-run-at-a-time rule as a single command — a batch counts
+  // as one run for this purpose, for its entire duration.
+  if (profile.active_run_id) {
+    return ws.send(
+      JSON.stringify({ type: 'error', message: 'You already have a command running' })
+    );
+  }
+
+  const isAdmin = profile.role === 'admin';
+  let batchData;
+  try {
+    batchData = await loadBatchForRun({ batchId, userId, orgId: profile.org_id, isAdmin });
+  } catch (err) {
+    return ws.send(JSON.stringify({ type: 'error', message: err.message }));
+  }
+
+  const { batch, steps } = batchData;
+  const regionId = batch.region_id;
+
+  let regionContext;
+  try {
+    regionContext = await loadRegionContext(regionId);
+  } catch (err) {
+    return ws.send(JSON.stringify({ type: 'error', message: err.message }));
+  }
+
+  // Create one run_history row per step up front, all sharing a
+  // batch_id, with 'running' status only on the first — the rest sit
+  // implicitly pending until the batch reaches them. This gives the UI
+  // a stable set of row IDs to reference from the very first message.
+  // A fresh id per execution of this batch (not the batch definition's
+  // own id) — so running the same saved batch twice produces two
+  // distinguishable groups of rows in history, the same way two runs
+  // of the same saved command are still separate run_history rows.
+  const commonBatchId = crypto.randomUUID();
+  const rowsToInsert = steps.map((cmd, i) => ({
+    org_id: profile.org_id,
+    user_id: userId,
+    region_id: regionId,
+    command_id: cmd.id,
+    command_version: cmd.current_version,
+    batch_id: commonBatchId,
+    batch_step_order: i,
+    raw_command_text: cmd.content,
+    status: i === 0 ? 'running' : 'pending', // real placeholder for
+    // not-yet-started steps — distinct from 'cancelled' so a page
+    // refresh mid-batch shows "waiting" rather than misleadingly
+    // implying the step was stopped before it ever got a turn.
+    timeout_used_s: cmd.timeout_seconds || config.defaultCommandTimeoutSeconds,
+  }));
+
+  const { data: runRows, error: insertErr } = await supabaseAdmin
+    .from('run_history')
+    .insert(rowsToInsert)
+    .select();
+  if (insertErr || !runRows) {
+    return ws.send(JSON.stringify({ type: 'error', message: 'Failed to start batch record' }));
+  }
+
+  // Map each step's position to its run_history row id, since
+  // runBatch() below refers to steps by a caller-defined id.
+  const rowByStepIndex = new Map();
+  runRows
+    .sort((a, b) => a.batch_step_order - b.batch_step_order)
+    .forEach((row) => rowByStepIndex.set(row.batch_step_order, row));
+
+  await supabaseAdmin
+    .from('profiles')
+    .update({ active_run_id: runRows[0].id })
+    .eq('id', userId);
+
+  ws.send(
+    JSON.stringify({
+      type: 'batch_started',
+      batchId: commonBatchId,
+      steps: steps.map((cmd, i) => ({
+        runId: rowByStepIndex.get(i).id,
+        name: cmd.name,
+        order: i,
+      })),
+    })
+  );
+
+  const perStepTimeout = (cmd) => cmd.timeout_seconds || config.defaultCommandTimeoutSeconds;
+
+  const { promise, cancel } = runBatch({
+    region: regionContext.region,
+    loginSteps: regionContext.loginSteps,
+    secrets: regionContext.secrets,
+    username: regionContext.username,
+    steps: steps.map((cmd, i) => ({ id: i, command: cmd.content })),
+    // A single timeout applies for the whole batch's per-step wait,
+    // using the longest individual command timeout so no step is cut
+    // short by a stricter neighbor's setting.
+    timeoutSeconds: Math.max(...steps.map(perStepTimeout)),
+    onStepStart: (stepIndex) => {
+      const row = rowByStepIndex.get(stepIndex);
+      if (stepIndex > 0) {
+        // Flip this step's placeholder status to 'running' now that
+        // it's actually starting.
+        supabaseAdmin.from('run_history').update({ status: 'running' }).eq('id', row.id);
+      }
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'step_started', runId: row.id }));
+      }
+    },
+    onOutput: (stepIndex, chunk) => {
+      const row = rowByStepIndex.get(stepIndex);
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'output', runId: row.id, chunk }));
+      }
+    },
+    onStepDone: (stepIndex, { status, output }) => {
+      const row = rowByStepIndex.get(stepIndex);
+      supabaseAdmin
+        .from('run_history')
+        .update({ status, output, ended_at: new Date().toISOString() })
+        .eq('id', row.id);
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'step_done', runId: row.id, status }));
+      }
+    },
+  });
+
+  ws._activeCancel = cancel;
+  ws._activeRunId = runRows[0].id;
+
+  // Same hard backstop as a single run, sized to the whole batch's
+  // worst case (sum of every step's timeout) rather than one step's,
+  // since the batch legitimately may take that long to reach a
+  // terminal state on its own.
+  const totalTimeoutS = steps.reduce((sum, cmd) => sum + perStepTimeout(cmd), 0) + 30;
+  let backstopFired = false;
+  const backstopTimer = setTimeout(async () => {
+    backstopFired = true;
+    cancel();
+    await sweepPendingBatchSteps(commonBatchId, 'timeout');
+    await supabaseAdmin.from('profiles').update({ active_run_id: null }).eq('id', userId);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'batch_done', batchId: commonBatchId, status: 'timeout' }));
+    }
+  }, totalTimeoutS * 1000);
+
+  const result = await promise;
+  clearTimeout(backstopTimer);
+  if (backstopFired) return;
+
+  // Any step that never got a turn (the batch stopped early due to a
+  // failure or a user cancel) is still sitting at 'pending' — resolve
+  // it to a real terminal status now, so history never shows a step
+  // as permanently "waiting" once the batch itself has ended.
+  await sweepPendingBatchSteps(commonBatchId, result.status === 'success' ? 'success' : 'cancelled');
+
+  ws._activeCancel = null;
+  ws._activeRunId = null;
+  await supabaseAdmin.from('profiles').update({ active_run_id: null }).eq('id', userId);
+
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'batch_done', batchId: commonBatchId, status: result.status }));
+  }
+}
+
 async function finalizeRun(runId, userId, status, output) {
   // These two updates are independent goals: recording the run's
   // outcome, and unlocking the user so they can run another command.
@@ -335,6 +567,26 @@ async function finalizeRun(runId, userId, status, output) {
     await supabaseAdmin.from('profiles').update({ active_run_id: null }).eq('id', userId);
   } catch (err) {
     console.error(`Failed to clear active_run_id for user ${userId}:`, err);
+  }
+}
+
+/**
+ * Resolves any run_history rows for this batch still sitting at
+ * 'pending' (steps that never got a turn because the batch stopped
+ * early) to a real terminal status. Called once after a batch settles,
+ * regardless of whether it finished normally, failed partway, was
+ * cancelled, or hit the backstop timeout — so history never shows a
+ * step stuck at "waiting" forever.
+ */
+async function sweepPendingBatchSteps(batchId, terminalStatus) {
+  try {
+    await supabaseAdmin
+      .from('run_history')
+      .update({ status: terminalStatus, ended_at: new Date().toISOString() })
+      .eq('batch_id', batchId)
+      .eq('status', 'pending');
+  } catch (err) {
+    console.error(`Failed to sweep pending steps for batch ${batchId}:`, err);
   }
 }
 

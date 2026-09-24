@@ -186,6 +186,18 @@ export const Icon = {
     </svg>
   ),
 
+  ArrowUp: ({ size = 18 }) => (
+    <svg {...base(size)}>
+      <path d="M12 19V6.5M6.5 11 12 5.5 17.5 11" />
+    </svg>
+  ),
+
+  ArrowDown: ({ size = 18 }) => (
+    <svg {...base(size)}>
+      <path d="M12 5v12.5M6.5 13 12 18.5 17.5 13" />
+    </svg>
+  ),
+
   Clock: ({ size = 18 }) => (
     <svg {...base(size)}>
       <circle cx="12" cy="12" r="8.75" />

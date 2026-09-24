@@ -1,9 +1,19 @@
 const supabaseAdmin = require('./supabaseAdmin');
 const { authenticate, sendJson } = require('./httpHelpers');
 
+// Single source of truth for which resource types can be shared and
+// which table backs each — extending to a new shareable type (like
+// batches) means adding one line here, not hunting down every ternary.
+const SHAREABLE_TABLES = {
+  region: 'regions',
+  command: 'commands',
+  batch: 'batches',
+};
+const SHAREABLE_TYPES = Object.keys(SHAREABLE_TABLES);
+
 /**
  * POST /shares
- * body: { accessToken, resourceType: 'region'|'command', resourceId, memberId }
+ * body: { accessToken, resourceType: 'region'|'command'|'batch', resourceId, memberId }
  *
  * Admin-only. Marks the underlying resource's visibility as 'shared'
  * (if it wasn't already) and creates the share row. Re-validates
@@ -18,11 +28,11 @@ async function createShare(req, res, body) {
   }
 
   const { resourceType, resourceId, memberId } = body;
-  if (!['region', 'command'].includes(resourceType) || !resourceId || !memberId) {
+  if (!SHAREABLE_TYPES.includes(resourceType) || !resourceId || !memberId) {
     return sendJson(res, 400, { error: 'resourceType, resourceId, and memberId are required' });
   }
 
-  const table = resourceType === 'region' ? 'regions' : 'commands';
+  const table = SHAREABLE_TABLES[resourceType];
   const { data: resource, error: resourceErr } = await supabaseAdmin
     .from(table)
     .select('id, org_id')
@@ -76,7 +86,7 @@ async function deleteShare(req, res, body) {
   }
 
   const { resourceType, resourceId, memberId } = body;
-  if (!['region', 'command'].includes(resourceType) || !resourceId || !memberId) {
+  if (!SHAREABLE_TYPES.includes(resourceType) || !resourceId || !memberId) {
     return sendJson(res, 400, { error: 'resourceType, resourceId, and memberId are required' });
   }
 
@@ -106,7 +116,7 @@ async function listShareContext(req, res, body) {
   }
 
   const { resourceType, resourceId } = body;
-  if (!['region', 'command'].includes(resourceType) || !resourceId) {
+  if (!SHAREABLE_TYPES.includes(resourceType) || !resourceId) {
     return sendJson(res, 400, { error: 'resourceType and resourceId are required' });
   }
 

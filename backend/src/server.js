@@ -3,6 +3,7 @@ const config = require('./config');
 const { attachWebSocketServer } = require('./wsServer');
 const { createRegion, updateRegion, deleteRegion } = require('./regionRoutes');
 const { createCommand, updateCommand, deleteCommand } = require('./commandRoutes');
+const { createBatch, updateBatch, deleteBatch } = require('./batchRoutes');
 const { createShare, deleteShare, listShareContext } = require('./shareRoutes');
 
 function readJsonBody(req) {
@@ -48,6 +49,10 @@ const routes = [
   ['POST', /^\/commands$/, createCommand],
   ['PATCH', /^\/commands\/([a-zA-Z0-9-]+)$/, updateCommand],
   ['DELETE', /^\/commands\/([a-zA-Z0-9-]+)$/, deleteCommand],
+
+  ['POST', /^\/batches$/, createBatch],
+  ['PATCH', /^\/batches\/([a-zA-Z0-9-]+)$/, updateBatch],
+  ['DELETE', /^\/batches\/([a-zA-Z0-9-]+)$/, deleteBatch],
 
   ['POST', /^\/shares$/, createShare],
   ['DELETE', /^\/shares$/, deleteShare],
