@@ -13,17 +13,15 @@ const supabaseAdmin = require('./supabaseAdmin');
 async function getSecret(secretRef) {
   if (!secretRef) return null;
 
-  const { data, error } = await supabaseAdmin
-    .from('decrypted_secrets') // Vault's view, lives in the `vault` schema
-    .select('decrypted_secret')
-    .eq('name', secretRef)
-    .single();
+  const { data, error } = await supabaseAdmin.rpc('vault_read_secret', {
+    p_name: secretRef,
+  });
 
   if (error) {
     throw new Error(`Failed to read secret "${secretRef}": ${error.message}`);
   }
 
-  return data ? data.decrypted_secret : null;
+  return data ?? null;
 }
 
 /**
